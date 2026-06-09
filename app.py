@@ -7,12 +7,17 @@ import ssl
 from datetime import datetime
 from collections import deque
 
-MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud:8884/mqtt"
+MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"
 MQTT_PORT = 8884
 MQTT_TOPIC = "kampus/dht22"
 MQTT_USER = "greedycat"
 MQTT_PASSWORD = "Yuana1112"
 
+# 🔴 KRUSIAL: WebSocket path untuk HiveMQ Cloud
+MQTT_PATH = "/mqtt"
+# ============================================================
+
+# Inisialisasi session state
 if 'suhu_data' not in st.session_state:
     st.session_state.suhu_data = deque(maxlen=50)
 if 'hum_data' not in st.session_state:
@@ -28,10 +33,11 @@ if 'latest_suhu' not in st.session_state:
 if 'latest_hum' not in st.session_state:
     st.session_state.latest_hum = "--"
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, rc, properties=None):
+    # Version 2 callback dengan properti tambahan
     if rc == 0:
         st.session_state.connected = True
-        print("✅ Terhubung ke HiveMQ!")
+        print("✅ Terhubung ke HiveMQ via WebSocket!")
         client.subscribe(MQTT_TOPIC)
     else:
         st.session_state.connected = False
@@ -60,23 +66,27 @@ def on_message(client, userdata, msg):
 
 @st.cache_resource
 def init_mqtt_client():
-    # Buat MQTT client
+    # 🔴 KRUSIAL: WebSocket transport untuk port 8884
     client = mqtt.Client(
-        client_id="streamlit_dashboard",
-        protocol=mqtt.MQTTv5
+        client_id="streamlit_dashboard_ws",
+        protocol=mqtt.MQTTv5,
+        transport="websockets"  # <-- INI KUNCI UTAMA!
     )
     
     # Set username dan password
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
     
-    # Setup TLS untuk HiveMQ Cloud
+    # Setup TLS untuk WebSocket
     client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
     
-    # Set callback functions
+    # Set callback functions (version 2)
     client.on_connect = on_connect
     client.on_message = on_message
     
-    # Connect ke broker
+    # 🔴 KRUSIAL: Connect dengan WebSocket path
+    client.ws_set_options(path=MQTT_PATH)  # <-- INI JUGA KRUSIAL!
+    
+    # Connect ke broker via WebSocket
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
     
     # Start loop background
@@ -88,12 +98,12 @@ def init_mqtt_client():
 st.set_page_config(page_title="Smart Campus", page_icon="🏫", layout="wide")
 
 st.title("🏫 Smart Campus Monitoring System")
-st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT")
+st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT (WebSocket)")
 
 # Inisialisasi MQTT client
 try:
     mqtt_client = init_mqtt_client()
-    st.success("✅ MQTT Client berhasil diinisialisasi. Menunggu koneksi...")
+    st.success("✅ MQTT Client berhasil diinisialisasi (WebSocket mode)")
 except Exception as e:
     st.error(f"❌ Gagal menginisialisasi MQTT Client: {e}")
     st.stop()
@@ -103,10 +113,10 @@ col1, col2, col3 = st.columns(3)
 
 with col1:
     if st.session_state.connected:
-        st.success("🟢 MQTT Connected")
+        st.success("🟢 MQTT Connected via WebSocket")
     else:
         st.error("🔴 MQTT Disconnected")
-        st.caption("Menunggu koneksi...")
+        st.caption("Menunggu koneksi WebSocket...")
 
 with col2:
     if st.session_state.last_update:
@@ -124,14 +134,12 @@ with col_metric1:
     st.metric(
         label="🌡️ Temperature",
         value=f"{st.session_state.latest_suhu} °C",
-        delta=None if st.session_state.latest_suhu == "--" else None
     )
 
 with col_metric2:
     st.metric(
         label="💧 Humidity",
         value=f"{st.session_state.latest_hum} %",
-        delta=None if st.session_state.latest_hum == "--" else None
     )
 
 # Real-time Chart
@@ -149,8 +157,6 @@ if len(st.session_state.time_data) > 0:
         x='Waktu', 
         y=['Suhu (°C)', 'Kelembapan (%)'],
         title='Sensor Reading History',
-        labels={'value': 'Nilai', 'variable': 'Parameter', 'Waktu': 'Waktu'},
-        color_discrete_map={'Suhu (°C)': '#ff4b4b', 'Kelembapan (%)': '#4b9eff'}
     )
     fig.update_layout(height=400)
     st.plotly_chart(fig, use_container_width=True)
@@ -160,16 +166,10 @@ if len(st.session_state.time_data) > 0:
     st.dataframe(
         df.tail(10).sort_values('Waktu', ascending=False),
         use_container_width=True,
-        column_config={
-            "Waktu": st.column_config.DatetimeColumn("Waktu", format="HH:mm:ss"),
-            "Suhu (°C)": st.column_config.NumberColumn("Suhu", format="%.1f °C"),
-            "Kelembapan (%)": st.column_config.NumberColumn("Kelembapan", format="%.1f %%")
-        }
     )
 else:
     st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data ke MQTT...")
-    st.caption("Pastikan ESP32 sudah terhubung dan mengirim data ke topic yang sama")
 
 # Footer
 st.divider()
-st.caption("🔧 Smart Campus IoT System | DHT22 → HiveMQ → Streamlit Dashboard")
+st.caption("🔧 Smart Campus IoT System | WebSocket Mode | Port 8884")
