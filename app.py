@@ -6,11 +6,14 @@ import json
 from datetime import datetime
 from collections import deque
 
-MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"  # Ganti Cluster URL
+# ============================================================
+# KONFIGURASI MQTT (GANTI DENGAN PUNYA ANDA)
+# ============================================================
+MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"
 MQTT_PORT = 8884
 MQTT_TOPIC = "kampus/dht22"
-MQTT_USER = "greedycat"     # Ganti username MQTT
-MQTT_PASSWORD = "Yuana1112" # Ganti password MQTT
+MQTT_USER = "greedycat"
+MQTT_PASSWORD = "Yuana1112"
 # ============================================================
 
 # Inisialisasi session state
@@ -36,7 +39,7 @@ def on_connect(client, userdata, flags, rc):
         client.subscribe(MQTT_TOPIC)
     else:
         st.session_state.connected = False
-        print(f"❌ Gagal, kode: {rc}")
+        print(f"❌ Gagal terhubung, kode: {rc}")
 
 def on_message(client, userdata, msg):
     try:
@@ -57,67 +60,119 @@ def on_message(client, userdata, msg):
         
         st.rerun()
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error parsing message: {e}")
 
 @st.cache_resource
 def init_mqtt_client():
+    # Menggunakan VERSION2 atau hapus parameter callback_api_version
     client = mqtt.Client(
         client_id="streamlit_dashboard",
-        protocol=mqtt.MQTTv5,
-        callback_api_version=mqtt.CallbackAPIVersion.VERSION1
+        protocol=mqtt.MQTTv5
     )
+    
+    # Set username dan password
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-    client.tls_set()
+    
+    # Setup TLS untuk HiveMQ Cloud
+    client.tls_set(cert_reqs=mqtt.ssl.CERT_REQUIRED)
+    
+    # Set callback functions
     client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(MQTT_BROKER, MQTT_PORT)
+    
+    # Connect ke broker
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    
+    # Start loop background
     client.loop_start()
+    
     return client
 
 # ========== TAMPILAN DASHBOARD ==========
 st.set_page_config(page_title="Smart Campus", page_icon="🏫", layout="wide")
+
 st.title("🏫 Smart Campus Monitoring System")
 st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT")
 
+# Inisialisasi MQTT client
 try:
     mqtt_client = init_mqtt_client()
 except Exception as e:
-    st.error(f"❌ Gagal konek: {e}")
+    st.error(f"❌ Gagal konek ke MQTT: {e}")
+    st.info("Pastikan username, password, dan broker URL sudah benar")
 
+# Status Panel
 col1, col2, col3 = st.columns(3)
+
 with col1:
     if st.session_state.connected:
         st.success("🟢 MQTT Connected")
     else:
         st.error("🔴 MQTT Disconnected")
+        st.caption("Menunggu koneksi...")
+
 with col2:
     if st.session_state.last_update:
-        st.info(f"🕐 Update: {st.session_state.last_update.strftime('%H:%M:%S')}")
+        st.info(f"🕐 Last Update: {st.session_state.last_update.strftime('%H:%M:%S')}")
     else:
-        st.info("🕐 Menunggu data...")
+        st.info("🕐 Waiting for data...")
+
 with col3:
-    st.info(f"📡 Topic: {MQTT_TOPIC}")
+    st.info(f"📡 Topic: `{MQTT_TOPIC}`")
 
-meter1, meter2 = st.columns(2)
-with meter1:
-    st.metric("🌡️ Temperature", f"{st.session_state.latest_suhu} °C")
-with meter2:
-    st.metric("💧 Humidity", f"{st.session_state.latest_hum} %")
+# Metric Cards
+col_metric1, col_metric2 = st.columns(2)
 
-st.subheader("📈 Grafik Real-time")
+with col_metric1:
+    st.metric(
+        label="🌡️ Temperature",
+        value=f"{st.session_state.latest_suhu} °C",
+        delta=None if st.session_state.latest_suhu == "--" else None
+    )
+
+with col_metric2:
+    st.metric(
+        label="💧 Humidity",
+        value=f"{st.session_state.latest_hum} %",
+        delta=None if st.session_state.latest_hum == "--" else None
+    )
+
+# Real-time Chart
+st.subheader("📈 Real-time Data History")
+
 if len(st.session_state.time_data) > 0:
     df = pd.DataFrame({
         'Waktu': list(st.session_state.time_data),
         'Suhu (°C)': list(st.session_state.suhu_data),
         'Kelembapan (%)': list(st.session_state.hum_data)
     })
-    fig = px.line(df, x='Waktu', y=['Suhu (°C)', 'Kelembapan (%)'])
+    
+    fig = px.line(
+        df, 
+        x='Waktu', 
+        y=['Suhu (°C)', 'Kelembapan (%)'],
+        title='Sensor Reading History',
+        labels={'value': 'Nilai', 'variable': 'Parameter', 'Waktu': 'Waktu'},
+        color_discrete_map={'Suhu (°C)': '#ff4b4b', 'Kelembapan (%)': '#4b9eff'}
+    )
     fig.update_layout(height=400)
     st.plotly_chart(fig, use_container_width=True)
     
-    st.subheader("📋 Data Terbaru")
-    st.dataframe(df.tail(10).sort_values('Waktu', ascending=False))
+    # Data Table
+    st.subheader("📋 Recent Data")
+    st.dataframe(
+        df.tail(10).sort_values('Waktu', ascending=False),
+        use_container_width=True,
+        column_config={
+            "Waktu": st.column_config.DatetimeColumn("Waktu", format="HH:mm:ss"),
+            "Suhu (°C)": st.column_config.NumberColumn("Suhu", format="%.1f °C"),
+            "Kelembapan (%)": st.column_config.NumberColumn("Kelembapan", format="%.1f %%")
+        }
+    )
 else:
-    st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data...")
+    st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data ke MQTT...")
+    st.caption("Pastikan ESP32 sudah terhubung dan mengirim data ke topic yang sama")
 
-st.caption("🔧 Smart Campus IoT | DHT22 → HiveMQ → Streamlit")
+# Footer
+st.divider()
+st.caption("🔧 Smart Campus IoT System | DHT22 → HiveMQ → Streamlit Dashboard")
