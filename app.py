@@ -4,20 +4,16 @@ import pandas as pd
 import plotly.express as px
 import json
 import ssl
-import queue
-import threading
+import time
 from datetime import datetime
 from collections import deque
 
 MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"
-MQTT_PORT = 8884
+MQTT_PORT = 8883  # 🔴 PAKAI 8883 BUKAN 8884
 MQTT_TOPIC = "kampus/dht22"
 MQTT_USER = "greedycat"
 MQTT_PASSWORD = "Yuana1112"
-MQTT_PATH = "/mqtt"
-# ============================================================
 
-# Inisialisasi session state
 if 'suhu_data' not in st.session_state:
     st.session_state.suhu_data = deque(maxlen=50)
 if 'hum_data' not in st.session_state:
@@ -32,43 +28,63 @@ if 'latest_suhu' not in st.session_state:
     st.session_state.latest_suhu = "--"
 if 'latest_hum' not in st.session_state:
     st.session_state.latest_hum = "--"
-
-# Queue untuk komunikasi antar thread
-message_queue = queue.Queue()
+if 'mqtt_client' not in st.session_state:
+    st.session_state.mqtt_client = None
 
 def on_connect(client, userdata, flags, rc, properties=None):
+    """Callback saat koneksi MQTT berhasil"""
     if rc == 0:
         st.session_state.connected = True
-        print("✅ Terhubung ke HiveMQ via WebSocket!")
+        print("✅ Connected to HiveMQ Cloud!")
         client.subscribe(MQTT_TOPIC)
     else:
         st.session_state.connected = False
-        print(f"❌ Gagal terhubung, kode: {rc}")
+        print(f"❌ Connection failed with code {rc}")
 
 def on_message(client, userdata, msg):
-    """Callback MQTT - masukkan pesan ke queue"""
+    """Callback saat menerima pesan MQTT"""
     try:
         payload = msg.payload.decode()
-        message_queue.put(payload)  # <-- KUNCI: pakai queue
+        data = json.loads(payload)
+        
+        suhu = data.get('temperature', 0)
+        hum = data.get('humidity', 0)
+        
+        # Update session state dengan data baru
+        st.session_state.latest_suhu = suhu
+        st.session_state.latest_hum = hum
+        st.session_state.last_update = datetime.now()
+        
+        st.session_state.suhu_data.append(suhu)
+        st.session_state.hum_data.append(hum)
+        st.session_state.time_data.append(datetime.now())
+        
+        print(f"📥 Received: {suhu}°C, {hum}%")
+        
     except Exception as e:
-        print(f"Error di callback: {e}")
+        print(f"Error parsing message: {e}")
 
-@st.cache_resource
 def init_mqtt_client():
-    # Inisialisasi client dengan WebSocket transport
+    """Inisialisasi MQTT client sesuai HiveMQ official sample[citation:8]"""
     client = mqtt.Client(
-        client_id="streamlit_dashboard_ws",
-        protocol=mqtt.MQTTv5,
-        transport="websockets"
+        client_id="streamlit_dashboard",
+        protocol=mqtt.MQTTv5  # MQTT version 5 untuk HiveMQ
     )
     
-    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-    client.ws_set_options(path=MQTT_PATH)
+    # Set callbacks
     client.on_connect = on_connect
     client.on_message = on_message
     
-    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    # Set username dan password
+    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+    
+    # 🔴 KRUSIAL: Setup TLS untuk koneksi aman
+    client.tls_set(tls_version=mqtt.client.ssl.PROTOCOL_TLS)
+    
+    # Connect ke HiveMQ Cloud
+    client.connect(MQTT_BROKER, MQTT_PORT)
+    
+    # Start loop di background
     client.loop_start()
     
     return client
@@ -77,38 +93,15 @@ def init_mqtt_client():
 st.set_page_config(page_title="Smart Campus", page_icon="🏫", layout="wide")
 
 st.title("🏫 Smart Campus Monitoring System")
-st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT (WebSocket)")
+st.caption("Monitoring Suhu & Kelembapan via HiveMQ Cloud (MQTT over TLS)")
 
-# Inisialisasi MQTT client
-try:
-    mqtt_client = init_mqtt_client()
-    st.success("✅ MQTT Client berjalan")
-except Exception as e:
-    st.error(f"❌ Gagal konek: {e}")
-    st.stop()
-
-# Process messages from queue (INI JUGA KUNCI!)
-try:
-    while not message_queue.empty():
-        payload = message_queue.get_nowait()
-        data = json.loads(payload)
-        
-        suhu = data.get('temperature', 0)
-        hum = data.get('humidity', 0)
-        now = datetime.now()
-        
-        st.session_state.latest_suhu = suhu
-        st.session_state.latest_hum = hum
-        st.session_state.last_update = now
-        
-        st.session_state.suhu_data.append(suhu)
-        st.session_state.hum_data.append(hum)
-        st.session_state.time_data.append(now)
-        
-except queue.Empty:
-    pass
-except Exception as e:
-    st.error(f"Error process data: {e}")
+# Inisialisasi MQTT client (hanya sekali)
+if st.session_state.mqtt_client is None:
+    try:
+        st.session_state.mqtt_client = init_mqtt_client()
+        st.success("✅ MQTT Client initialized")
+    except Exception as e:
+        st.error(f"❌ Failed to initialize MQTT: {e}")
 
 # Status Panel
 col1, col2, col3 = st.columns(3)
@@ -118,6 +111,7 @@ with col1:
         st.success("🟢 MQTT Connected")
     else:
         st.error("🔴 MQTT Disconnected")
+        st.caption("Waiting for connection...")
 
 with col2:
     if st.session_state.last_update:
@@ -154,13 +148,14 @@ if len(st.session_state.time_data) > 0:
     st.subheader("📋 Recent Data")
     st.dataframe(df.tail(10).sort_values('Waktu', ascending=False))
 else:
-    st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data...")
+    st.info("⏳ No data yet. Waiting for ESP32 to send data...")
+    st.caption("Make sure ESP32 is running and publishing to the correct topic")
 
-# Auto-refresh setiap 2 detik untuk mengambil data dari queue
+# Auto-refresh every 3 seconds
 st.empty()
-st.caption("🔧 Auto-refresh setiap 2 detik")
-
-# Trigger rerun untuk mengambil data baru dari queue
-import time
-time.sleep(2)
+time.sleep(3)
 st.rerun()
+
+# Footer
+st.divider()
+st.caption("🔧 Smart Campus IoT | DHT22 → HiveMQ Cloud → Streamlit Dashboard | MQTT over TLS (Port 8883)")
