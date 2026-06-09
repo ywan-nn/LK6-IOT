@@ -7,7 +7,7 @@ import ssl
 from datetime import datetime
 from collections import deque
 
-MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"
+MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud:8884/mqtt"
 MQTT_PORT = 8884
 MQTT_TOPIC = "kampus/dht22"
 MQTT_USER = "greedycat"
