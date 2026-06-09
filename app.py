@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.express as px
 import json
 import ssl
+import queue
+import threading
 from datetime import datetime
 from collections import deque
 
@@ -12,8 +14,6 @@ MQTT_PORT = 8884
 MQTT_TOPIC = "kampus/dht22"
 MQTT_USER = "greedycat"
 MQTT_PASSWORD = "Yuana1112"
-
-# 🔴 KRUSIAL: WebSocket path untuk HiveMQ Cloud
 MQTT_PATH = "/mqtt"
 # ============================================================
 
@@ -33,8 +33,10 @@ if 'latest_suhu' not in st.session_state:
 if 'latest_hum' not in st.session_state:
     st.session_state.latest_hum = "--"
 
+# Queue untuk komunikasi antar thread
+message_queue = queue.Queue()
+
 def on_connect(client, userdata, flags, rc, properties=None):
-    # Version 2 callback dengan properti tambahan
     if rc == 0:
         st.session_state.connected = True
         print("✅ Terhubung ke HiveMQ via WebSocket!")
@@ -44,8 +46,51 @@ def on_connect(client, userdata, flags, rc, properties=None):
         print(f"❌ Gagal terhubung, kode: {rc}")
 
 def on_message(client, userdata, msg):
+    """Callback MQTT - masukkan pesan ke queue"""
     try:
         payload = msg.payload.decode()
+        message_queue.put(payload)  # <-- KUNCI: pakai queue
+    except Exception as e:
+        print(f"Error di callback: {e}")
+
+@st.cache_resource
+def init_mqtt_client():
+    # Inisialisasi client dengan WebSocket transport
+    client = mqtt.Client(
+        client_id="streamlit_dashboard_ws",
+        protocol=mqtt.MQTTv5,
+        transport="websockets"
+    )
+    
+    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    client.ws_set_options(path=MQTT_PATH)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    client.loop_start()
+    
+    return client
+
+# ========== TAMPILAN DASHBOARD ==========
+st.set_page_config(page_title="Smart Campus", page_icon="🏫", layout="wide")
+
+st.title("🏫 Smart Campus Monitoring System")
+st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT (WebSocket)")
+
+# Inisialisasi MQTT client
+try:
+    mqtt_client = init_mqtt_client()
+    st.success("✅ MQTT Client berjalan")
+except Exception as e:
+    st.error(f"❌ Gagal konek: {e}")
+    st.stop()
+
+# Process messages from queue (INI JUGA KUNCI!)
+try:
+    while not message_queue.empty():
+        payload = message_queue.get_nowait()
         data = json.loads(payload)
         
         suhu = data.get('temperature', 0)
@@ -60,63 +105,19 @@ def on_message(client, userdata, msg):
         st.session_state.hum_data.append(hum)
         st.session_state.time_data.append(now)
         
-        st.rerun()
-    except Exception as e:
-        print(f"Error parsing message: {e}")
-
-@st.cache_resource
-def init_mqtt_client():
-    # 🔴 KRUSIAL: WebSocket transport untuk port 8884
-    client = mqtt.Client(
-        client_id="streamlit_dashboard_ws",
-        protocol=mqtt.MQTTv5,
-        transport="websockets"  # <-- INI KUNCI UTAMA!
-    )
-    
-    # Set username dan password
-    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-    
-    # Setup TLS untuk WebSocket
-    client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
-    
-    # Set callback functions (version 2)
-    client.on_connect = on_connect
-    client.on_message = on_message
-    
-    # 🔴 KRUSIAL: Connect dengan WebSocket path
-    client.ws_set_options(path=MQTT_PATH)  # <-- INI JUGA KRUSIAL!
-    
-    # Connect ke broker via WebSocket
-    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-    
-    # Start loop background
-    client.loop_start()
-    
-    return client
-
-# ========== TAMPILAN DASHBOARD ==========
-st.set_page_config(page_title="Smart Campus", page_icon="🏫", layout="wide")
-
-st.title("🏫 Smart Campus Monitoring System")
-st.caption("Monitoring Suhu & Kelembapan via HiveMQ MQTT (WebSocket)")
-
-# Inisialisasi MQTT client
-try:
-    mqtt_client = init_mqtt_client()
-    st.success("✅ MQTT Client berhasil diinisialisasi (WebSocket mode)")
+except queue.Empty:
+    pass
 except Exception as e:
-    st.error(f"❌ Gagal menginisialisasi MQTT Client: {e}")
-    st.stop()
+    st.error(f"Error process data: {e}")
 
 # Status Panel
 col1, col2, col3 = st.columns(3)
 
 with col1:
     if st.session_state.connected:
-        st.success("🟢 MQTT Connected via WebSocket")
+        st.success("🟢 MQTT Connected")
     else:
         st.error("🔴 MQTT Disconnected")
-        st.caption("Menunggu koneksi WebSocket...")
 
 with col2:
     if st.session_state.last_update:
@@ -131,16 +132,10 @@ with col3:
 col_metric1, col_metric2 = st.columns(2)
 
 with col_metric1:
-    st.metric(
-        label="🌡️ Temperature",
-        value=f"{st.session_state.latest_suhu} °C",
-    )
+    st.metric("🌡️ Temperature", f"{st.session_state.latest_suhu} °C")
 
 with col_metric2:
-    st.metric(
-        label="💧 Humidity",
-        value=f"{st.session_state.latest_hum} %",
-    )
+    st.metric("💧 Humidity", f"{st.session_state.latest_hum} %")
 
 # Real-time Chart
 st.subheader("📈 Real-time Data History")
@@ -152,24 +147,20 @@ if len(st.session_state.time_data) > 0:
         'Kelembapan (%)': list(st.session_state.hum_data)
     })
     
-    fig = px.line(
-        df, 
-        x='Waktu', 
-        y=['Suhu (°C)', 'Kelembapan (%)'],
-        title='Sensor Reading History',
-    )
+    fig = px.line(df, x='Waktu', y=['Suhu (°C)', 'Kelembapan (%)'])
     fig.update_layout(height=400)
     st.plotly_chart(fig, use_container_width=True)
     
-    # Data Table
     st.subheader("📋 Recent Data")
-    st.dataframe(
-        df.tail(10).sort_values('Waktu', ascending=False),
-        use_container_width=True,
-    )
+    st.dataframe(df.tail(10).sort_values('Waktu', ascending=False))
 else:
-    st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data ke MQTT...")
+    st.info("⏳ Belum ada data. Tunggu ESP32 mengirim data...")
 
-# Footer
-st.divider()
-st.caption("🔧 Smart Campus IoT System | WebSocket Mode | Port 8884")
+# Auto-refresh setiap 2 detik untuk mengambil data dari queue
+st.empty()
+st.caption("🔧 Auto-refresh setiap 2 detik")
+
+# Trigger rerun untuk mengambil data baru dari queue
+import time
+time.sleep(2)
+st.rerun()
