@@ -7,7 +7,7 @@ from datetime import datetime
 from collections import deque
 
 MQTT_BROKER = "tugasiot-03e0bc5a.a01.euc1.aws.hivemq.cloud"  # Ganti Cluster URL
-MQTT_PORT = 8883
+MQTT_PORT = 8884
 MQTT_TOPIC = "kampus/dht22"
 MQTT_USER = "greedycat"     # Ganti username MQTT
 MQTT_PASSWORD = "Yuana1112" # Ganti password MQTT
